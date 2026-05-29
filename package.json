@@ -23,10 +23,10 @@
   "devDependencies": {
     "chai": "^4.5.0",
     "js-beautify": "^1.14.3",
-    "jshint": "^0.5.9",
+    "jshint": "^2.13.6",
     "mocha": "^11.7.5",
     "rewire": "^9.0.1",
-    "sinon": "^14.0.2"
+    "sinon": "^22.0.0"
   },
   "dependencies": {
     "@slack/web-api": "^7.0.2"
