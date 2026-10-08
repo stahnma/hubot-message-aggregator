@@ -31,7 +31,8 @@ const handleReaction = (res, robot) => {
         return;
     }
 
-    const channelIdRegex = /^C[0-9A-Z]{9}$/;
+    // Public (C) and older private (G) channel IDs; newer IDs are longer than 10 characters
+    const channelIdRegex = /^[CG][0-9A-Z]{8,}$/;
     let targetChannel;
 
     if (channelIdRegex.test(aggregationChannel)) {
@@ -170,8 +171,9 @@ function cleanupBrain(robot) {
     const threshold = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
     const currentTime = new Date().getTime();
 
-    // Iterate over the brain data and remove outdated entries
-    for (const key in robot.brain.data) {
+    // robot.brain.set() stores keys under brain.data._private, so look there
+    const stored = robot.brain.data._private || {};
+    for (const key of Object.keys(stored)) {
         if (key.startsWith('permalink_')) {
             const timestamp = robot.brain.get(key);
             if (currentTime - timestamp >= threshold) {
