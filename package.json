@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/stahnma/mandatoryFun/hubot-modules/hubot-message-aggregator"
+    "url": "git+https://github.com/stahnma/hubot-message-aggregator.git"
   },
   "keywords": [
     "thanks",
