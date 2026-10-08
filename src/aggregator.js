@@ -53,11 +53,12 @@ const handleReaction = (res, robot) => {
 };
 
 function isSlackAdapter(robot) {
-    const adapterName = robot.adapterName != null
-        ? robot.adapterName
-        : robot.adapter && robot.adapter.name != null
-        ? robot.adapter.name
-        : '';
+    let adapterName = '';
+    if (robot.adapterName != null) {
+        adapterName = robot.adapterName;
+    } else if (robot.adapter && robot.adapter.name != null) {
+        adapterName = robot.adapter.name;
+    }
     return /slack/i.test(adapterName);
 }
 
