@@ -12,6 +12,7 @@ const {
     fetchMessagePermalink
 } = aggregator;
 const isSlackAdapter = aggregator.__get__('isSlackAdapter');
+const getSlackWebClient = aggregator.__get__('getSlackWebClient');
 
 describe('reaction-aggregator module exports', () => {
     let robot;
@@ -50,6 +51,7 @@ describe('reaction-aggregator module exports', () => {
         // gives the module its own bindings that sinon.useFakeTimers does not replace)
         aggregator.__set__('Date', Date);
         aggregator.__set__('setInterval', setInterval);
+        aggregator.__set__('channelIdCache', {});
     });
 
     afterEach(() => {
@@ -452,24 +454,69 @@ describe('reaction-aggregator module exports', () => {
             expect(conversationsInfoStub.calledWith({ channel: 'CFOO' })).to.be.true;
             expect(chatGetPermalinkStub.calledWith({ channel: 'CFOO', message_ts: '999.111' })).to.be.true;
         });
+
+        it('uses the adapter web client when available', async () => {
+            const adapterInfoStub = sinon.stub().resolves({
+                ok: true,
+                channel: { is_private: false }
+            });
+            const adapterPermalinkStub = sinon.stub().resolves({
+                ok: true,
+                permalink: 'https://slack.com/archives/C123/p1'
+            });
+            robot.adapter = {
+                client: {
+                    web: {
+                        conversations: { info: adapterInfoStub },
+                        chat: { getPermalink: adapterPermalinkStub }
+                    }
+                }
+            };
+            const result = await fetchMessagePermalink(robot, 'C123', '1.1');
+            expect(result.permalink).to.equal('https://slack.com/archives/C123/p1');
+            expect(adapterInfoStub.calledOnce).to.be.true;
+            expect(WebClientStub.notCalled).to.be.true;
+        });
     });
 
-    describe('findChannelIdByName', () => {
+    describe('getSlackWebClient', () => {
         let WebClientStub;
-        let conversationsListStub;
 
         beforeEach(() => {
-            process.env.HUBOT_SLACK_TOKEN = 'xoxb-test-token';
-            conversationsListStub = sinon.stub();
-            WebClientStub = sinon.stub().returns({
-                conversations: { list: conversationsListStub }
-            });
+            WebClientStub = sinon.stub().returns({ fallback: true });
             aggregator.__set__('require', function(mod) {
                 if (mod === '@slack/web-api') {
                     return { WebClient: WebClientStub };
                 }
                 return require(mod);
             });
+        });
+
+        it('returns the adapter web client when present', () => {
+            const web = { adapter: true };
+            robot.adapter = { client: { web: web } };
+            expect(getSlackWebClient(robot)).to.equal(web);
+            expect(WebClientStub.notCalled).to.be.true;
+        });
+
+        it('falls back to a WebClient built from HUBOT_SLACK_TOKEN', () => {
+            process.env.HUBOT_SLACK_TOKEN = 'xoxb-test-token';
+            robot.adapter = { client: {} };
+            expect(getSlackWebClient(robot)).to.deep.equal({ fallback: true });
+            expect(WebClientStub.calledWith('xoxb-test-token')).to.be.true;
+        });
+    });
+
+    describe('findChannelIdByName', () => {
+        let conversationsListStub;
+
+        beforeEach(() => {
+            conversationsListStub = sinon.stub();
+            robot.adapter = {
+                client: {
+                    web: { conversations: { list: conversationsListStub } }
+                }
+            };
         });
 
         it('returns channel ID for matching non-archived channel', async () => {
@@ -482,6 +529,87 @@ describe('reaction-aggregator module exports', () => {
             });
             const id = await findChannelIdByName(robot, 'general');
             expect(id).to.equal('C111');
+        });
+
+        it('requests public and private channels, excluding archived', async () => {
+            conversationsListStub.resolves({
+                ok: true,
+                channels: [{ id: 'G111', name: 'secret', is_archived: false }]
+            });
+            const id = await findChannelIdByName(robot, 'secret');
+            expect(id).to.equal('G111');
+            expect(conversationsListStub.firstCall.args[0]).to.include({
+                types: 'public_channel,private_channel',
+                exclude_archived: true
+            });
+        });
+
+        it('pages through results until the channel is found', async () => {
+            conversationsListStub.onFirstCall().resolves({
+                ok: true,
+                channels: [{ id: 'C111', name: 'general', is_archived: false }],
+                response_metadata: { next_cursor: 'page2' }
+            });
+            conversationsListStub.onSecondCall().resolves({
+                ok: true,
+                channels: [{ id: 'C999', name: 'thanks', is_archived: false }],
+                response_metadata: { next_cursor: 'page3' }
+            });
+            const id = await findChannelIdByName(robot, 'thanks');
+            expect(id).to.equal('C999');
+            expect(conversationsListStub.calledTwice).to.be.true;
+            expect(conversationsListStub.secondCall.args[0].cursor).to.equal('page2');
+        });
+
+        it('returns null after exhausting all pages', async () => {
+            conversationsListStub.onFirstCall().resolves({
+                ok: true,
+                channels: [{ id: 'C111', name: 'general', is_archived: false }],
+                response_metadata: { next_cursor: 'page2' }
+            });
+            conversationsListStub.onSecondCall().resolves({
+                ok: true,
+                channels: [{ id: 'C222', name: 'random', is_archived: false }],
+                response_metadata: { next_cursor: '' }
+            });
+            const id = await findChannelIdByName(robot, 'nonexistent');
+            expect(id).to.be.null;
+            expect(conversationsListStub.calledTwice).to.be.true;
+        });
+
+        it('falls back to public channels when groups:read scope is missing', async () => {
+            const scopeError = new Error('An API error occurred: missing_scope');
+            scopeError.data = { ok: false, error: 'missing_scope' };
+            conversationsListStub.onFirstCall().rejects(scopeError);
+            conversationsListStub.onSecondCall().resolves({
+                ok: true,
+                channels: [{ id: 'C111', name: 'general', is_archived: false }]
+            });
+            const id = await findChannelIdByName(robot, 'general');
+            expect(id).to.equal('C111');
+            expect(conversationsListStub.secondCall.args[0].types).to.equal('public_channel');
+            expect(robot.logger.error.notCalled).to.be.true;
+        });
+
+        it('caches the channel ID after a successful lookup', async () => {
+            conversationsListStub.resolves({
+                ok: true,
+                channels: [{ id: 'C111', name: 'general', is_archived: false }]
+            });
+            await findChannelIdByName(robot, 'general');
+            const id = await findChannelIdByName(robot, 'general');
+            expect(id).to.equal('C111');
+            expect(conversationsListStub.calledOnce).to.be.true;
+        });
+
+        it('does not cache a failed lookup', async () => {
+            conversationsListStub.onFirstCall().resolves({ ok: true, channels: [] });
+            conversationsListStub.onSecondCall().resolves({
+                ok: true,
+                channels: [{ id: 'C111', name: 'general', is_archived: false }]
+            });
+            expect(await findChannelIdByName(robot, 'general')).to.be.null;
+            expect(await findChannelIdByName(robot, 'general')).to.equal('C111');
         });
 
         it('skips archived channels', async () => {

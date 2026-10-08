@@ -8,10 +8,13 @@
 //  HUBOT_AGGREGATION_CHANNEL - the channel to post the permalink to (e.g. general or C1234567890)
 //  HUBOT_AGGREGATION_FROM_PRIVATE_CONVERSATIONS - whether to aggregate permalinks from private conversations (default: false)
 //  HUBOT_AGGREGATION_PATTERN - the string or regular expression pattern to match for the reaction (default: thank)
-//  HUBOT_SLACK_TOKEN - the Slack API token (this is likely already set)
 //
 // Notes:
-//  This script is intended to be used only with the Slack adapter.
+//  This script is intended to be used only with the Slack adapter. It uses the
+//  adapter's Slack Web API client (robot.adapter.client.web), falling back to a
+//  client built from HUBOT_SLACK_TOKEN if the adapter does not expose one.
+//  Looking up HUBOT_AGGREGATION_CHANNEL by name in private channels needs the
+//  groups:read scope. The bot must be a member of the aggregation channel.
 //
 // Author:
 //   stahnma
@@ -53,11 +56,12 @@ const handleReaction = (res, robot) => {
 };
 
 function isSlackAdapter(robot) {
-    const adapterName = robot.adapterName != null
-        ? robot.adapterName
-        : robot.adapter && robot.adapter.name != null
-        ? robot.adapter.name
-        : '';
+    let adapterName = '';
+    if (robot.adapterName != null) {
+        adapterName = robot.adapterName;
+    } else if (robot.adapter && robot.adapter.name != null) {
+        adapterName = robot.adapter.name;
+    }
     return /slack/i.test(adapterName);
 }
 
@@ -116,12 +120,20 @@ function handleReactionWithChannelId(res, robot, channelId, aggregatorPattern, r
         });
 }
 
+function getSlackWebClient(robot) {
+    const adapterClient = robot.adapter && robot.adapter.client && robot.adapter.client.web;
+    if (adapterClient) {
+        return adapterClient;
+    }
+    const {
+        WebClient
+    } = require('@slack/web-api');
+    return new WebClient(process.env.HUBOT_SLACK_TOKEN);
+}
+
 function fetchMessagePermalink(robot, channel, ts) {
     return new Promise((resolve, reject) => {
-        const {
-            WebClient
-        } = require('@slack/web-api');
-        const slackWebClient = new WebClient(process.env.HUBOT_SLACK_TOKEN);
+        const slackWebClient = getSlackWebClient(robot);
 
         slackWebClient.conversations.info({
             channel: channel
@@ -169,25 +181,58 @@ function cleanupBrain(robot) {
     }
 }
 
-function findChannelIdByName(robot, channelName) {
-    const {
-        WebClient
-    } = require('@slack/web-api');
-    const slackWebClient = new WebClient(process.env.HUBOT_SLACK_TOKEN);
+// Cache of channel name -> ID, so we don't page through every channel on each reaction
+let channelIdCache = {};
 
-    return slackWebClient.conversations.list()
-        .then(response => {
-            if (response.ok) {
-                const channel = response.channels.find(c => c.name === channelName && !c.is_archived);
-                return channel ? channel.id : null;
-            } else {
-                throw new Error('Failed to fetch channel list');
-            }
-        })
-        .catch(error => {
-            robot.logger.error("Error fetching channel ID by name:", error);
-            return null;
+async function listChannelsForName(slackWebClient, channelName, types) {
+    const matches = c => c.name === channelName && !c.is_archived;
+    let cursor;
+    do {
+        const response = await slackWebClient.conversations.list({
+            types: types,
+            exclude_archived: true,
+            limit: 200,
+            cursor: cursor
         });
+        if (!response.ok) {
+            throw new Error('Failed to fetch channel list');
+        }
+        const channel = response.channels.find(matches);
+        if (channel) {
+            return channel.id;
+        }
+        cursor = response.response_metadata && response.response_metadata.next_cursor;
+    } while (cursor);
+    return null;
+}
+
+async function findChannelIdByName(robot, channelName) {
+    if (channelIdCache[channelName]) {
+        return channelIdCache[channelName];
+    }
+
+    const slackWebClient = getSlackWebClient(robot);
+
+    try {
+        let channelId;
+        try {
+            channelId = await listChannelsForName(slackWebClient, channelName, 'public_channel,private_channel');
+        } catch (error) {
+            // Without groups:read, Slack rejects the request outright; fall back to public channels only
+            if (!(error.data && error.data.error === 'missing_scope')) {
+                throw error;
+            }
+            robot.logger.info('Missing groups:read scope; searching public channels only.');
+            channelId = await listChannelsForName(slackWebClient, channelName, 'public_channel');
+        }
+        if (channelId) {
+            channelIdCache[channelName] = channelId;
+        }
+        return channelId;
+    } catch (error) {
+        robot.logger.error("Error fetching channel ID by name:", error);
+        return null;
+    }
 }
 
 module.exports = (robot) => {

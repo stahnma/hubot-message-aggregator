@@ -40,6 +40,15 @@ ChannelID such as `C1234567890` or a string such as `general`.
 
 :warning: Note, the `#` should not be included.
 
+## Slack setup
+
+The aggregator uses the Slack adapter's own Web API client, so no extra token
+is needed. The bot must be invited to the aggregation channel to post there.
+
+When `HUBOT_AGGREGATION_CHANNEL` is a name, the bot looks it up with
+`conversations.list`, which needs the `channels:read` scope. Add `groups:read`
+to also find private channels.
+
 ## Behavior
 
 To reduce noise, in case a message gets several reactions that match the
