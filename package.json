@@ -1,6 +1,6 @@
 {
   "name": "hubot-message-aggregator",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Aggreate message into a single channel based upon an emoji reaction. (such as thanks)",
   "main": "index.js",
   "scripts": {
