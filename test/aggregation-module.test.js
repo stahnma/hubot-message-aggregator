@@ -26,16 +26,17 @@ describe('reaction-aggregator module exports', () => {
                 error: sinon.spy(),
                 info: sinon.spy()
             },
+            // Mirrors Hubot's Brain, which keeps get/set/remove keys under data._private
             brain: {
-                data: {},
+                data: { _private: {} },
                 get(key) {
-                    return this.data[key];
+                    return this.data._private[key];
                 },
                 set(key, value) {
-                    this.data[key] = value;
+                    this.data._private[key] = value;
                 },
                 remove(key) {
-                    delete this.data[key];
+                    delete this.data._private[key];
                 }
             },
             messageRoom: sinon.spy(),
@@ -86,6 +87,19 @@ describe('reaction-aggregator module exports', () => {
             await handleReaction(res, robot);
             expect(handleStub.calledOnce).to.be.true;
             expect(handleStub.firstCall.args[2]).to.equal('CABCDEFGH1');
+        });
+
+        it('treats 11-character and G-prefixed IDs as channel IDs', async () => {
+            for (const id of ['C0ABCDEFGH1', 'G01234567']) {
+                process.env.HUBOT_AGGREGATION_CHANNEL = id;
+                const handleStub = sinon.stub();
+                const findStub = sinon.stub().resolves('CWRONG');
+                aggregator.__set__('handleReactionWithChannelId', handleStub);
+                aggregator.__set__('findChannelIdByName', findStub);
+                await handleReaction(res, robot);
+                expect(findStub.notCalled, id).to.be.true;
+                expect(handleStub.firstCall.args[2]).to.equal(id);
+            }
         });
 
         it('logs error when findChannelIdByName returns null', async () => {
@@ -200,7 +214,7 @@ describe('reaction-aggregator module exports', () => {
             aggregator.__set__('fetchMessagePermalink', fetchStub);
             await handleReactionWithChannelId(baseRes, robot, 'CDEST', 'thank', 'i');
             await Promise.resolve();
-            expect(robot.brain.data['permalink_http://perma']).to.equal(Date.now());
+            expect(robot.brain.data._private['permalink_http://perma']).to.equal(Date.now());
         });
 
         it('does not repost within 24h', async () => {
@@ -664,41 +678,54 @@ describe('reaction-aggregator module exports', () => {
     describe('cleanupBrain', () => {
         it('removes entries older than 24h and retains recent ones', () => {
             const now = Date.now();
-            robot.brain.data = {
+            robot.brain.data._private = {
                 'permalink_old': now - 25 * 3600 * 1000,
                 'permalink_new': now - 1 * 3600 * 1000
             };
             cleanupBrain(robot);
-            expect(robot.brain.data).to.not.have.property('permalink_old');
-            expect(robot.brain.data).to.have.property('permalink_new');
+            expect(robot.brain.data._private).to.not.have.property('permalink_old');
+            expect(robot.brain.data._private).to.have.property('permalink_new');
         });
 
         it('removes entries exactly 24h old', () => {
             const now = Date.now();
-            robot.brain.data = {
+            robot.brain.data._private = {
                 'permalink_boundary': now - 24 * 3600 * 1000
             };
             cleanupBrain(robot);
-            expect(robot.brain.data).to.not.have.property('permalink_boundary');
+            expect(robot.brain.data._private).to.not.have.property('permalink_boundary');
         });
 
         it('preserves non-permalink brain keys', () => {
             const now = Date.now();
-            robot.brain.data = {
+            robot.brain.data._private = {
                 'permalink_old': now - 25 * 3600 * 1000,
                 'some_other_key': 'important data',
                 'user_prefs': { theme: 'dark' }
             };
             cleanupBrain(robot);
-            expect(robot.brain.data).to.not.have.property('permalink_old');
-            expect(robot.brain.data).to.have.property('some_other_key');
-            expect(robot.brain.data).to.have.property('user_prefs');
+            expect(robot.brain.data._private).to.not.have.property('permalink_old');
+            expect(robot.brain.data._private).to.have.property('some_other_key');
+            expect(robot.brain.data._private).to.have.property('user_prefs');
         });
 
-        it('handles empty brain data', () => {
+        it('leaves top-level brain data alone', () => {
+            const now = Date.now();
+            robot.brain.data.permalink_toplevel = now - 25 * 3600 * 1000;
+            cleanupBrain(robot);
+            expect(robot.brain.data).to.have.property('permalink_toplevel');
+        });
+
+        it('handles a brain with no private data', () => {
             robot.brain.data = {};
             cleanupBrain(robot);
             expect(Object.keys(robot.brain.data)).to.have.length(0);
+        });
+
+        it('handles empty brain data', () => {
+            robot.brain.data._private = {};
+            cleanupBrain(robot);
+            expect(Object.keys(robot.brain.data._private)).to.have.length(0);
         });
     });
 
@@ -772,10 +799,10 @@ describe('reaction-aggregator module exports', () => {
                 hearReaction: sinon.spy(),
                 logger: { error: sinon.spy(), info: sinon.spy() },
                 brain: {
-                    data: {},
-                    get(key) { return this.data[key]; },
-                    set(key, value) { this.data[key] = value; },
-                    remove(key) { delete this.data[key]; }
+                    data: { _private: {} },
+                    get(key) { return this.data._private[key]; },
+                    set(key, value) { this.data._private[key] = value; },
+                    remove(key) { delete this.data._private[key]; }
                 }
             };
             aggregator(initRobot);
@@ -783,12 +810,12 @@ describe('reaction-aggregator module exports', () => {
             // "stale" should be older than 24h relative to T+24h → set to T (age = 24h, removed)
             // "fresh" should be younger than 24h relative to T+24h → set to T+12h (age = 12h, kept)
             const now = Date.now();
-            initRobot.brain.data['permalink_stale'] = now;
-            initRobot.brain.data['permalink_fresh'] = now + 12 * 3600 * 1000;
+            initRobot.brain.set('permalink_stale', now);
+            initRobot.brain.set('permalink_fresh', now + 12 * 3600 * 1000);
             // Advance clock by 24 hours to trigger the interval
             clock.tick(24 * 60 * 60 * 1000);
-            expect(initRobot.brain.data).to.not.have.property('permalink_stale');
-            expect(initRobot.brain.data).to.have.property('permalink_fresh');
+            expect(initRobot.brain.data._private).to.not.have.property('permalink_stale');
+            expect(initRobot.brain.data._private).to.have.property('permalink_fresh');
         });
     });
 });
